@@ -57,6 +57,18 @@ python3 app.py
 
 This is the only mode where **apt clean** and **journal vacuum** buttons work — inside the container those buttons give you the host command instead, because the container's apt/journal aren't the host's.
 
+## Exclusions
+
+Some paths should never be scanned — a big network mount under `/mnt`, a backup drive, anything you already know about. Set them in `docker-compose.yml` (or `EXCLUDE_PATHS` when running directly):
+
+```yaml
+- EXCLUDE_PATHS=/mnt,/media,/srv/backups
+```
+
+Comma-separated, absolute paths. An excluded path is never walked, counted, or shown — not in largest folders/files, not in categories, not in the Docker / Python / log lists. Excluding `/mnt` also excludes `/mnt/anything` underneath it. `/proc`, `/sys`, `/dev`, and `/run` are always skipped on top of this, and `/` itself can't be excluded.
+
+After changing the setting, restart the container (`docker compose up -d`) — or try it out live first: the UI has an "Exclude from scan" box that applies immediately and rescans, but those changes only last until the container restarts. The compose setting is the permanent one.
+
 ## Cleanup
 
 Cleanup is **off by default** (`ENABLE_CLEANUP=0`). The compose file turns it on. Buttons:

@@ -14,6 +14,11 @@ or / when run directly), totals every directory, and shows:
     distro python in /usr/lib (do NOT delete - apt and the OS use it)
   - Caches: apt, pip, npm, cargo, go, /tmp
 
+Exclusions: EXCLUDE_PATHS=/mnt,/media (comma-separated, in
+docker-compose.yml, or changed live from the UI) keeps those
+trees out of the scan entirely - never walked, counted, or
+shown. /proc, /sys, /dev and /run are always skipped.
+
 Cleanup: every finding ships with the exact shell command to fix it,
 and - when ENABLE_CLEANUP=1 - a button in the UI that runs it
 (truncate a log, delete a file/dir, docker prune, apt clean,
@@ -59,6 +64,36 @@ SCAN_TIMEOUT = float(os.environ.get("SCAN_TIMEOUT", "300"))
 MAX_LARGEST_FILES = 200
 
 SKIP_DIRS = {"proc", "sys", "dev", "run"}
+
+
+def parse_exclude(value):
+    """Comma-separated display paths -> sorted, de-duplicated list.
+    Each entry must be absolute; '/' is ignored (it would exclude
+    everything) and '..' is rejected. A path excludes itself and
+    everything under it."""
+    out = []
+    for raw in (value or "").split(","):
+        p = raw.strip().rstrip("/") or "/"
+        if not p.startswith("/") or ".." in p.split("/"):
+            continue
+        if p == "/" or p in out:
+            continue
+        out.append(p)
+    return sorted(out)
+
+
+# Exclusion list, in display form (host paths as the user sees them,
+# e.g. /mnt). Set with EXCLUDE_PATHS=/mnt,/media in the environment
+# (docker-compose.yml), or changed live from the UI via /api/exclusions.
+# /proc, /sys, /dev and /run are always skipped on top of this.
+EXCLUDED = parse_exclude(os.environ.get("EXCLUDE_PATHS", ""))
+
+
+def is_excluded(display_path):
+    for ex in EXCLUDED:
+        if display_path == ex or display_path.startswith(ex + "/"):
+            return True
+    return False
 # Paths (display form, i.e. starting with /) that cleanup will never touch.
 BLOCKED_EXACT = {"/", "/bin", "/boot", "/etc", "/lib", "/lib64", "/sbin",
                  "/usr", "/usr/bin", "/usr/lib", "/usr/local", "/var",
@@ -239,10 +274,14 @@ def _walk(path, depth, deadline, acc):
             if entry.is_dir(follow_symlinks=False):
                 if depth == 0 and entry.name in SKIP_DIRS:
                     continue
+                if is_excluded(to_display(entry.path)):
+                    continue
                 # Never descend into the container's own /proc-style mounts
                 # or into another mounted filesystem's pseudo dirs.
                 total += _walk(entry.path, depth + 1, deadline, acc)
             elif entry.is_file(follow_symlinks=False):
+                if is_excluded(to_display(entry.path)):
+                    continue
                 try:
                     st = entry.stat(follow_symlinks=False)
                 except OSError:
@@ -264,7 +303,11 @@ def _walk(path, depth, deadline, acc):
 
 
 def size_of_display(path):
-    """One-off du of a single display path (for categories)."""
+    """One-off du of a single display path (for categories).
+    Returns 0 for excluded paths, so categories / python / logs
+    never count a subtree the scan itself skipped."""
+    if is_excluded(path):
+        return 0
     host = to_host(path)
     if not os.path.exists(host):
         return 0
@@ -642,6 +685,13 @@ tr:hover td{background:#1f2937}
   <span id="status" class="small"></span>
   <span id="cleanupState" class="small"></span>
 </div>
+<div class="row">
+  <label class="small" for="excl">Exclude from scan:</label>
+  <input id="excl" placeholder="/mnt,/media" size="32">
+  <button class="ghost" id="applyExcl">Apply &amp; rescan</button>
+  <span id="exclState" class="small"></span>
+</div>
+<p class="small">Excluded paths are never walked, counted, or shown. Change them here to try it out (lasts until the container restarts), or set EXCLUDE_PATHS in docker-compose.yml to keep them — comma-separated, e.g. <code>EXCLUDE_PATHS=/mnt,/media</code>.</p>
 <div class="cards" id="overview"></div>
 
 <h2>Where the space goes — categories</h2>
@@ -691,6 +741,9 @@ function render(){
   document.getElementById('status').textContent = st.status==='scanning' ? `scanning ${esc(st.root)}… ${st.files} files so far` :
     `${st.status} · ${st.files} files · ${st.dirs} dirs · ${st.duration_s.toFixed(1)}s${st.message?' · '+esc(st.message):''}`;
   document.getElementById('cleanupState').textContent = S.cleanup_enabled ? 'cleanup: ON' : 'cleanup: OFF (set ENABLE_CLEANUP=1 to enable buttons)';
+  document.getElementById('exclState').textContent = (S.exclusions && S.exclusions.length) ? 'excluding: '+S.exclusions.join(', ') : 'excluding: nothing (besides /proc, /sys, /dev, /run)';
+  const excl=document.getElementById('excl');
+  if(document.activeElement!==excl && S.exclusions) excl.value=S.exclusions.join(',');
   document.getElementById('overview').innerHTML = S.mounts.map(m=>`<div class="card"><b>${fmt(m.used)} / ${fmt(m.total)}</b><span>${esc(m.mount)} · ${m.pct}% used · ${fmt(m.free)} free</span><div class="bar"><i class="${m.pct>90?'bad':m.pct>75?'':'ok'}" style="width:${Math.min(m.pct,100)}%"></i></div></div>`).join('') || '<div class="card">no mounts found</div>';
   const sel=document.getElementById('rootSel');
   if(!sel.options.length){ ['/','/var','/var/lib/docker','/home','/usr','/opt','/tmp'].forEach(p=>{const o=document.createElement('option');o.value=p;o.textContent='scan '+p;sel.appendChild(o)}); sel.onchange=()=>{fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({root:sel.value})}); curRoot=sel.value; load();}; }
@@ -727,6 +780,11 @@ function renderFiles(){
   document.getElementById('files').innerHTML = rows.map(f=>`<tr><td>${esc(f.path)}</td><td>${fmt(f.size)}</td><td class="small">${f.mtime?new Date(f.mtime*1000).toLocaleDateString():'—'}</td><td>${f.path.endsWith('.log')?`<button onclick="cleanup('truncate_log','${esc(f.path)}',this)" ${S.cleanup_enabled?'':'disabled'}>truncate</button> `:`<button class="danger" onclick="cleanup('delete_path','${esc(f.path)}',this)" ${S.cleanup_enabled?'':'disabled'}>delete</button>`}</td></tr>`).join('') || '<tr><td colspan="4">No files yet.</td></tr>';
 }
 document.getElementById('rescan').onclick=()=>{fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({root:curRoot})}); setTimeout(load,500);};
+document.getElementById('applyExcl').onclick=async()=>{
+  const v=document.getElementById('excl').value;
+  const r=await fetch('/api/exclusions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({paths:v})});
+  const j=await r.json(); document.getElementById('exclState').textContent=j.message||''; setTimeout(load,500);
+};
 document.getElementById('q').addEventListener('input',renderFiles);
 load(); setInterval(()=>{ if(S && S.state.status==='scanning') load(); },3000);
 </script></body></html>
@@ -764,7 +822,8 @@ class Handler(BaseHTTPRequestHandler):
                         "top_dirs": list(RESULT["top_dirs"]),
                         "largest_files": list(RESULT["largest_files"]),
                         "docker": docker_info(), "docker_fs": dict(RESULT["docker_fs"]),
-                        "cleanup_enabled": ENABLE_CLEANUP}
+                        "cleanup_enabled": ENABLE_CLEANUP,
+                        "exclusions": list(EXCLUDED)}
             self.send_json(snap)
         elif self.path.startswith("/api/browse"):
             from urllib.parse import urlparse, parse_qs
@@ -794,6 +853,17 @@ class Handler(BaseHTTPRequestHandler):
                 return
             scan_async(root)
             self.send_json({"ok": True, "message": f"scan of {root} started"})
+        elif self.path == "/api/exclusions":
+            global EXCLUDED
+            raw = payload.get("paths", payload.get("exclude_paths", ""))
+            if isinstance(raw, list):
+                raw = ",".join(str(p) for p in raw)
+            EXCLUDED = parse_exclude(raw)
+            log(f"exclusions set to {EXCLUDED} (in-memory; set EXCLUDE_PATHS to keep them after restart)")
+            scan_async(STATE.get("root", "/"))
+            self.send_json({"ok": True, "exclusions": list(EXCLUDED),
+                            "message": f"exclusions updated ({', '.join(EXCLUDED) or 'none'}) - rescanning. "
+                            "To keep them after a restart, set EXCLUDE_PATHS in docker-compose.yml."})
         elif self.path == "/api/cleanup":
             ok, message, freed = do_cleanup(payload.get("action", ""), payload.get("target", ""))
             self.send_json({"ok": ok, "message": message, "freed": freed},

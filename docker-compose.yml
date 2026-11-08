@@ -26,6 +26,15 @@
 # There is no login in v1. Do NOT expose port 8081 to the internet.
 # Keep it on LAN / VPN, or put it behind a reverse proxy with auth.
 #
+# Exclusions: EXCLUDE_PATHS is a comma-separated list of host paths
+# the scan skips entirely (never walked, counted, or shown).
+# /mnt is excluded here by default - add whatever you need, e.g.
+#   - EXCLUDE_PATHS=/mnt,/media,/srv/backups
+# /proc, /sys, /dev and /run are always skipped on top of this.
+# You can also change exclusions live from the UI (Apply & rescan),
+# but those only last until the container restarts - this setting
+# is the permanent one. Restart after changing it: docker compose up -d.
+#
 # Note: apt clean and journal vacuum only work when DiskHog runs
 # directly on the host (python3 app.py) - inside the container
 # those buttons tell you the host command to run instead, because
@@ -44,6 +53,7 @@ services:
       - PORT=8081
       - ENABLE_CLEANUP=1
       - SCAN_TIMEOUT=300
+      - EXCLUDE_PATHS=/mnt
     volumes:
       - /:/host:rw
       - /var/run/docker.sock:/var/run/docker.sock:ro
