@@ -10,7 +10,7 @@ What is eating disk on your Debian VMs, in one page. Local only — no cloud, no
 - **Categories** — the usual suspects, summed: Docker images/layers, Docker container logs, Docker volumes, system logs, APT cache, Python installs, pip cache, `/tmp`, home caches.
 - **Docker** — from the Docker API (`docker system df`): images with size / dangling / unused, containers, volumes, build cache. Unused = no container references the image.
 - **Python versions** — every `python3.x` tree in `/usr/lib`, `/usr/local/lib`, `/opt`, and `~/.pyenv/versions`, with the current version marked. **Distro python in `/usr/lib` is flagged DO NOT DELETE** — apt and the OS use it. Only pyenv / `/usr/local` / `/opt` versions are offered for removal, and only if they aren't the current one.
-- **Logs** — every big `*.log`, plus the systemd journal size.
+- **Logs** — every big `*.log`, plus the systemd journal size. Docker container logs show the container's **name**, not the 64-character id in the path (see "How it works").
 
 Every finding also shows the exact shell command to fix it by hand, so you never have to trust the buttons.
 
@@ -109,6 +109,7 @@ sudo truncate -s 0 /var/lib/docker/containers/*/*-json.log
 - The UI polls `/api/summary` while a scan is running. Rescan from the dropdown (scan `/`, `/var`, `/var/lib/docker`, `/home`, …) or the Rescan button.
 - First scan can take a minute or two on a big VM. Scan timeout is `SCAN_TIMEOUT` (default 300s); a timed-out scan keeps its partial results and says so.
 - Docker data comes from the socket API, not from parsing `docker` CLI output. If no socket is mounted, the Docker section falls back to on-disk sizes for `/var/lib/docker/*`.
+- Container names for log files: a container's log lives at `/var/lib/docker/containers/<64-char id>/<id>-json.log`. The id maps to a name two ways — the Docker API (`GET /containers/json`, needs the socket) first, then the container's own `config.v2.json` on disk in the same directory, which also works with no socket and for containers already removed that left their log behind. If neither has a name, the short id (first 12 chars) is shown with "name unknown" instead of being passed off as a name. The same name appears as a tag on the file in the Largest files table.
 
 ## Limits, stated plainly
 

@@ -8,7 +8,11 @@ or / when run directly), totals every directory, and shows:
   - largest folders (click to drill down) and largest files
   - Docker: images / containers / volumes / build cache from the
     Docker API (system/df), plus on-disk docker dirs and container logs
-  - Logs: /var/log, journal, and every *.log over 10 MB
+  - Logs: /var/log, journal, and every *.log over 10 MB.
+    Docker container logs show the container's name: the log file
+    lives at /var/lib/docker/containers/<id>/<id>-json.log, and
+    the id maps to a name via the Docker API, or via that
+    container's config.v2.json on disk when the socket is absent.
   - Python: every installed python3.x tree, which one is current,
     which are pyenv / /usr/local / /opt (safe to remove) vs the
     distro python in /usr/lib (do NOT delete - apt and the OS use it)
@@ -253,6 +257,57 @@ def docker_info():
             "images_count": len(img_rows)}
 
 
+# ---------------------------------------------------------------- container names for docker log files
+# A container's log lives at /var/lib/docker/containers/<64-char id>/
+# <id>-json.log - the directory name is the id, not anything human.
+# The readable name comes from two places, tried in order:
+#   1. The Docker API (GET /containers/json?all=1): Id -> Names[0].
+#      Needs the docker socket, which the compose file mounts.
+#   2. The container's own config on disk:
+#      /var/lib/docker/containers/<id>/config.v2.json has "Name".
+#      This works even with no socket, and for containers that have
+#      already been removed but left their log directory behind.
+# If neither yields a name, the short id (first 12 chars) is shown
+# and flagged as name-unknown, so a bare hex string is never passed
+# off as a name.
+DOCKER_CONTAINER_RE = re.compile(r"^/var/lib/docker/containers/([0-9a-f]{64})(?:/|$)")
+_CONTAINER_NAME_CACHE = {}
+_CONTAINER_API_FETCHED = [False]
+
+
+def container_name_for_id(cid):
+    """Return {"name": str, "id": short id, "named": bool} for a container id."""
+    if cid in _CONTAINER_NAME_CACHE:
+        return _CONTAINER_NAME_CACHE[cid]
+    if not _CONTAINER_API_FETCHED[0] and os.path.exists(DOCKER_SOCK):
+        _CONTAINER_API_FETCHED[0] = True
+        for c in docker_request("GET", "/containers/json?all=1") or []:
+            full = c.get("Id", "")
+            name = (c.get("Names") or [""])[0].lstrip("/")
+            if full and name:
+                _CONTAINER_NAME_CACHE[full] = {"name": name, "id": full[:12], "named": True}
+        if cid in _CONTAINER_NAME_CACHE:
+            return _CONTAINER_NAME_CACHE[cid]
+    name = ""
+    try:
+        with open(to_host(f"/var/lib/docker/containers/{cid}/config.v2.json")) as f:
+            name = (json.load(f).get("Name") or "").lstrip("/")
+    except (OSError, ValueError):
+        name = ""
+    result = {"name": name, "id": cid[:12], "named": bool(name)} if name else \
+             {"name": cid[:12], "id": cid[:12], "named": False}
+    _CONTAINER_NAME_CACHE[cid] = result
+    return result
+
+
+def docker_log_container(display_path):
+    """Container info for a path under /var/lib/docker/containers/<id>/, or None."""
+    m = DOCKER_CONTAINER_RE.match(display_path or "")
+    if not m:
+        return None
+    return container_name_for_id(m.group(1))
+
+
 # ---------------------------------------------------------------- scanner
 def _walk(path, depth, deadline, acc):
     """Recursive du. acc: dict with dir_sizes, largest heap, counts.
@@ -346,7 +401,13 @@ def scan_root(root_display):
     except RecursionError:
         status, message = "partial", "directory tree too deep - results are partial"
     largest = sorted(acc["largest"], key=lambda t: -t[0])
-    largest_files = [{"path": p, "size": s, "mtime": m} for s, p, m in largest]
+    largest_files = []
+    for s, p, m in largest:
+        row = {"path": p, "size": s, "mtime": m}
+        container = docker_log_container(p)
+        if container:
+            row["container"] = container
+        largest_files.append(row)
     # Children of root: direct subdirs recorded in dir_sizes.
     if root_display == "/":
         children = [d for d in acc["dir_sizes"] if d.count("/") == 1 and d != "/"]
@@ -493,14 +554,18 @@ def build_python(acc=None):
 def build_logs(largest_files, acc=None):
     rows = []
     for f in largest_files:
-        if f["path"].endswith((".log", ".log.1", ".gz")) and "/log" in f["path"]:
-            rows.append({**f, "kind": "log file"})
+        # Note: a docker log path (/var/lib/docker/containers/<id>/
+        # <id>-json.log) contains no "/log" substring, so it needs
+        # its own match - otherwise container logs never listed here.
+        is_docker_log = "/var/lib/docker/containers/" in f["path"] and f["path"].endswith(".log")
+        if f["path"].endswith((".log", ".log.1", ".gz")) and ("/log" in f["path"] or is_docker_log):
+            rows.append({**f, "kind": "docker container log" if is_docker_log else "log file"})
     # Journal size (a directory, not in largest-files).
     j = (acc or {}).get("dir_sizes", {}).get("/var/log/journal", 0) if acc else 0
     if not j:
         j = size_of_display("/var/log/journal")
     if j:
-        rows.append({"path": "/var/log/journal", "size": j, "mtime": 0, "kind": "systemd journal"})
+        rows.append({"path": "/var/log/journal", "size": j, "mtime": 0, "kind": "systemd journal", "container": None})
     rows.sort(key=lambda r: -r["size"])
     return rows[:30]
 
@@ -706,7 +771,8 @@ tr:hover td{background:#1f2937}
 <table><thead><tr><th>Version</th><th>Path</th><th>Size</th><th>Safety</th><th></th></tr></thead><tbody id="pythons"></tbody></table>
 
 <h2>Logs</h2>
-<table><thead><tr><th>Path</th><th>Size</th><th>Kind</th><th></th></tr></thead><tbody id="logs"></tbody></table>
+<p class="small">Docker container logs show the container's name, not just its id — resolved from the Docker API, or from the container's config.v2.json on disk when the socket isn't available. A short id with "name unknown" means neither source had a name for it (often a container that was removed but left its log behind).</p>
+<table><thead><tr><th>Container</th><th>Path</th><th>Size</th><th>Kind</th><th></th></tr></thead><tbody id="logs"></tbody></table>
 
 <h2>Largest folders <span class="small" id="crumb"></span></h2>
 <div class="breadcrumb row" id="crumbs"></div>
@@ -764,7 +830,7 @@ function render(){
    <p class="small">Or by hand: <code>docker image prune -a</code> (unused), <code>docker volume prune</code>, <code>docker builder prune -a</code>, <code>docker system prune -a --volumes</code>. Unused = no container references it.</p>`;
   document.getElementById('pyNote').textContent = `Current python for this app: ${S.python.current}. Distro python in /usr/lib is used by apt and the OS — never delete it. Only pyenv / /usr/local / /opt versions are safe to remove, and only if nothing uses them. Reclaimable from removable non-current versions: ${fmt(S.python.reclaimable||0)}.`;
   document.getElementById('pythons').innerHTML = S.python.rows.map(p=>`<tr><td>${esc(p.version)}${p.current?' <span class="tag green">current</span>':''}</td><td>${esc(p.path)}</td><td>${fmt(p.size)}</td><td class="small">${esc(p.safety)}</td><td>${p.removable&&!p.current?`<button class="danger" onclick="cleanup('delete_path','${esc(p.path)}',this)" ${S.cleanup_enabled?'':'disabled'}>delete</button> <button class="ghost" onclick="copyCmd(this)" data-cmd="${esc(p.command)}">copy cmd</button>`:''}</td></tr>`).join('') || '<tr><td colspan="5">No python trees found yet.</td></tr>';
-  document.getElementById('logs').innerHTML = S.logs.map(l=>`<tr><td>${esc(l.path)}</td><td>${fmt(l.size)}</td><td>${esc(l.kind)}</td><td>${l.kind==='log file'?`<button onclick="cleanup('truncate_log','${esc(l.path)}',this)" ${S.cleanup_enabled?'':'disabled'}>truncate</button>`:l.kind==='systemd journal'?`<button onclick="cleanup('vacuum_journal','500M',this)" ${S.cleanup_enabled?'':'disabled'}>vacuum to 500M</button>`:''}</td></tr>`).join('') || '<tr><td colspan="4">No big logs found yet.</td></tr>';
+  document.getElementById('logs').innerHTML = S.logs.map(l=>`<tr><td>${l.container?(l.container.named?`<b>${esc(l.container.name)}</b><br><span class="small">${esc(l.container.id)}</span>`:`<span class="small">${esc(l.container.id)} · name unknown</span>`):'—'}</td><td>${esc(l.path)}</td><td>${fmt(l.size)}</td><td>${esc(l.kind)}</td><td>${(l.kind==='log file'||l.kind==='docker container log')?`<button onclick="cleanup('truncate_log','${esc(l.path)}',this)" ${S.cleanup_enabled?'':'disabled'}>truncate</button>`:l.kind==='systemd journal'?`<button onclick="cleanup('vacuum_journal','500M',this)" ${S.cleanup_enabled?'':'disabled'}>vacuum to 500M</button>`:''}</td></tr>`).join('') || '<tr><td colspan="5">No big logs found yet.</td></tr>';
   renderFolders(); renderFiles();
 }
 function renderFolders(){
@@ -777,7 +843,7 @@ function renderFolders(){
 function renderFiles(){
   const q=(document.getElementById('q').value||'').toLowerCase();
   const rows=S.largest_files.filter(f=>!q||f.path.toLowerCase().includes(q)).slice(0,100);
-  document.getElementById('files').innerHTML = rows.map(f=>`<tr><td>${esc(f.path)}</td><td>${fmt(f.size)}</td><td class="small">${f.mtime?new Date(f.mtime*1000).toLocaleDateString():'—'}</td><td>${f.path.endsWith('.log')?`<button onclick="cleanup('truncate_log','${esc(f.path)}',this)" ${S.cleanup_enabled?'':'disabled'}>truncate</button> `:`<button class="danger" onclick="cleanup('delete_path','${esc(f.path)}',this)" ${S.cleanup_enabled?'':'disabled'}>delete</button>`}</td></tr>`).join('') || '<tr><td colspan="4">No files yet.</td></tr>';
+  document.getElementById('files').innerHTML = rows.map(f=>`<tr><td>${esc(f.path)}${f.container?`<br><span class="tag">🐳 ${esc(f.container.name)}${f.container.named?'':` · name unknown`}</span>`:''}</td><td>${fmt(f.size)}</td><td class="small">${f.mtime?new Date(f.mtime*1000).toLocaleDateString():'—'}</td><td>${f.path.endsWith('.log')?`<button onclick="cleanup('truncate_log','${esc(f.path)}',this)" ${S.cleanup_enabled?'':'disabled'}>truncate</button> `:`<button class="danger" onclick="cleanup('delete_path','${esc(f.path)}',this)" ${S.cleanup_enabled?'':'disabled'}>delete</button>`}</td></tr>`).join('') || '<tr><td colspan="4">No files yet.</td></tr>';
 }
 document.getElementById('rescan').onclick=()=>{fetch('/api/scan',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({root:curRoot})}); setTimeout(load,500);};
 document.getElementById('applyExcl').onclick=async()=>{
