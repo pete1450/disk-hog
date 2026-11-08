@@ -1,0 +1,50 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Syntax check
+        run: python3 -m py_compile app.py
+      - name: Smoke test (server starts, health + summary answer)
+        run: |
+          AUTOSCAN=0 HOST_ROOT=/ PORT=8081 ENABLE_CLEANUP=0 python3 app.py > /tmp/diskhog.log 2>&1 &
+          echo $! > /tmp/diskhog.pid
+          for i in $(seq 1 15); do
+            if curl -fsS http://localhost:8081/health > /dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          curl -fsS http://localhost:8081/health
+          curl -fsS http://localhost:8081/api/summary | python3 -c "import json,sys; d=json.load(sys.stdin); assert 'mounts' in d and 'largest_files' in d"
+          kill "$(cat /tmp/diskhog.pid)" || true
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build image (no push)
+        run: docker build -t diskhog:test .
+      - name: Image smoke test
+        run: |
+          docker run -d --name diskhog-test -p 8081:8081 \
+            -e AUTOSCAN=0 -e HOST_ROOT=/ -e ENABLE_CLEANUP=0 diskhog:test
+          for i in $(seq 1 15); do
+            if curl -fsS http://localhost:8081/health > /dev/null 2>&1; then break; fi
+            sleep 1
+          done
+          curl -fsS http://localhost:8081/health
+          docker logs diskhog-test
+          docker stop diskhog-test

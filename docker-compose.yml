@@ -1,0 +1,42 @@
+# DiskHog - one container per host, LAN only.
+# Run from this directory:
+#   docker compose up -d --build
+# Then open: http://<host-lan-ip>:8081
+#
+# Why this is privileged (and why that is the whole point):
+#   /:/host:rw lets the container walk the host filesystem and,
+#   when you click a cleanup button, delete/truncate the file you
+#   picked. Without it the app can only see itself.
+#   The guard is in the app, not the mount: a hard blocklist
+#   refuses /, /etc, /usr, /var/lib/docker itself and friends,
+#   and every delete asks you to confirm. For a read-only view,
+#   change this mount to :ro and set ENABLE_CLEANUP=0 below.
+#   /var/run/docker.sock:ro lets it ask Docker for image /
+#   container / volume / build-cache sizes (docker system df).
+#   pid: host is NOT needed - DiskHog reads disk, not processes.
+#
+# Cleanup is ON here (ENABLE_CLEANUP=1) so the buttons work.
+# There is no login in v1. Do NOT expose port 8081 to the internet.
+# Keep it on LAN / VPN, or put it behind a reverse proxy with auth.
+#
+# Note: apt clean and journal vacuum only work when DiskHog runs
+# directly on the host (python3 app.py) - inside the container
+# those buttons tell you the host command to run instead, because
+# the container's apt/journal are not the host's.
+
+services:
+  diskhog:
+    build: .
+    image: diskhog:local
+    container_name: diskhog
+    restart: unless-stopped
+    ports:
+      - "8081:8081"
+    environment:
+      - HOST_ROOT=/host
+      - PORT=8081
+      - ENABLE_CLEANUP=1
+      - SCAN_TIMEOUT=300
+    volumes:
+      - /:/host:rw
+      - /var/run/docker.sock:/var/run/docker.sock:ro
