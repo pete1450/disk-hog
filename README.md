@@ -18,12 +18,35 @@ Every finding also shows the exact shell command to fix it by hand, so you never
 
 ### In Docker (recommended — one per host)
 
+`docker-compose.yml` pulls the prebuilt image that CI publishes to GHCR on every push to main (`ghcr.io/pete1450/disk-hog:latest`). No build needed on the host:
+
 ```bash
-docker compose up -d --build
+docker compose up -d
 # open http://<host-lan-ip>:8081
 ```
 
+To pick up a new release later: `docker compose pull && docker compose up -d` (the compose file already sets `pull_policy: always`, so a plain `up -d` pulls the latest image too).
+
 It mounts `/:/host` and `/var/run/docker.sock:ro`. See `docker-compose.yml` for why, and for the read-only variant (`:ro` + `ENABLE_CLEANUP=0`).
+
+### Building the image yourself
+
+If you'd rather build locally than pull the GHCR image — for dev, or to test a change before pushing — use the dev override, which builds the `Dockerfile` in this repo and tags it `diskhog:local`:
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+# open http://<host-lan-ip>:8081
+```
+
+Or just the image, without Compose:
+
+```bash
+docker build -t diskhog:local .
+docker run -d --name diskhog -p 8081:8081 \
+  -e HOST_ROOT=/host -e ENABLE_CLEANUP=1 \
+  -v /:/host:rw -v /var/run/docker.sock:/var/run/docker.sock:ro \
+  diskhog:local
+```
 
 ### Directly on the host
 
@@ -81,10 +104,11 @@ sudo truncate -s 0 /var/lib/docker/containers/*/*-json.log
 - No auth in v1. LAN only.
 - `apt clean` / journal vacuum don't work from inside the container (see above).
 - A scan is a snapshot — files created after it won't show until you rescan.
-- The Docker image build is verified by CI on every push (`.github/workflows/build.yml` builds the image and smoke-tests it). It was **not** built in the agent VM (no Docker daemon there) — run `docker compose up -d --build` on your host and check `docker logs diskhog` if it doesn't come up.
+- CI builds the image on every push (`.github/workflows/build.yml` — syntax check, server smoke test, image build + container smoke test) and publishes it to GHCR on pushes to main (`ghcr.io/pete1450/disk-hog:latest` and `:<sha>`). It was **not** built in the agent VM (no Docker daemon there) — if the container doesn't come up on your host, check `docker logs diskhog` and the Actions tab.
 
 ## Files
 
 - `app.py` — the whole app (backend + UI)
 - `Dockerfile` — `python:3.13-slim` (currently Debian trixie-based), stdlib only
-- `docker-compose.yml` — one container per host
+- `docker-compose.yml` — prod: one container per host, pulls the GHCR image
+- `docker-compose.dev.yml` — dev override: build the image yourself instead

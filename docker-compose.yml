@@ -1,7 +1,14 @@
 # DiskHog - one container per host, LAN only.
+# This is the PROD compose: it pulls the prebuilt image that CI
+# publishes to GHCR on every push to main
+# (ghcr.io/pete1450/disk-hog:latest - see .github/workflows/build.yml).
+#
 # Run from this directory:
-#   docker compose up -d --build
+#   docker compose up -d
 # Then open: http://<host-lan-ip>:8081
+#
+# To build the image yourself instead, see "Building the image
+# yourself" in the README (docker-compose.dev.yml override).
 #
 # Why this is privileged (and why that is the whole point):
 #   /:/host:rw lets the container walk the host filesystem and,
@@ -26,8 +33,8 @@
 
 services:
   diskhog:
-    build: .
-    image: diskhog:local
+    image: ghcr.io/pete1450/disk-hog:latest
+    pull_policy: always
     container_name: diskhog
     restart: unless-stopped
     ports:

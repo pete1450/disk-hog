@@ -1,0 +1,16 @@
+# DiskHog - DEV override: build the image yourself instead of
+# pulling the prebuilt one from GHCR.
+#
+# Run from this directory:
+#   docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d --build
+#
+# This file only overrides the image source: it replaces the
+# ghcr.io image in docker-compose.yml with a local build of the
+# Dockerfile in this repo, tagged diskhog:local. Everything else
+# (ports, mounts, environment) still comes from docker-compose.yml.
+
+services:
+  diskhog:
+    build: .
+    image: diskhog:local
+    pull_policy: never
